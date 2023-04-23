@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.optimize import curve_fit
 
 def read_ascii_file(file_name):
     """
@@ -110,29 +111,56 @@ def process_wave_data(time, real, imag):
 
 import sys
 
+def fit_quadratic_and_output_min_omega(time, omega):
+    def quadratic(x, a, b, c):
+        return a * x**2 + b * x + c
+
+    # Filter the data for t=100 to t=300
+    time_filtered = time[(time >= 100) & (time <= 300)]
+    omega_filtered = omega[(time >= 100) & (time <= 300)]
+
+    # Fit a quadratic curve to the Omega data using nonlinear least squares
+    params, _ = curve_fit(quadratic, time_filtered, omega_filtered)
+
+    # Find the extremum value of the quadratic curve
+    a, b, c = params
+    extremum_x = -b / (2 * a)
+    omega_min_quad_fit = quadratic(extremum_x, a, b, c)
+    omega_at_t_zero = quadratic(0.0, a, b, c)
+
+    print(f"The extremum of the quadratic curve occurs at t = {extremum_x:.15f} with omega = {omega_min_quad_fit:.15f} . implied omega(t=0) = {omega_at_t_zero:.15f}")
+    
+    
 def main():
     """
     Main function that reads the gravitational wave data file, processes the data,
     and saves the output to a file. The input filename is provided via command line.
     """
     if len(sys.argv) != 2:
-        print("Usage: python script.py <gravitational_wave_data.asc>")
+        print("Usage: python3 phase_amp_omega.py <gravitational_wave_data.asc or .txt>")
         sys.exit(1)
 
     file_name = sys.argv[1]
 
-    if not file_name.endswith('.asc'):
-        print("Error: Input file must have a '.asc' extension.")
+    if not file_name.endswith('.asc') and not file_name.endswith('.txt'):
+        print("Error: Input file must have a '.asc' or '.txt' extension.")
         sys.exit(1)
 
     time, real, imag = read_ascii_file(file_name)
-    time, cumulative_phase, amplitude = process_wave_data(time, real, imag)
+    time, cumulative_phase, amplitude, omega = process_wave_data(time, real, imag)
 
-    output_file = file_name.replace('.asc', '_amp_phase.asc')
+    fit_quadratic_and_output_min_omega(time, omega)
+
+    output_file = file_name
+    if file_name.endswith('.asc'):
+        output_file = output_file.replace('.asc', '_phase_amp_omega.asc')
+    elif file_name.endswith('.txt'):
+        output_file = output_file.replace('.txt', '_phase_amp_omega.txt')
+
     with open(output_file, 'w') as file:
-        file.write("# Time    Cumulative_Phase    Amplitude\n")
-        for t, cp, a in zip(time, cumulative_phase, amplitude):
-            file.write(f"{t:.15f} {cp:.15f} {a:.15f}\n")
+        file.write("# Time    cumulative_phase    amplitude    omega\n")
+        for t, cp, a, o in zip(time, cumulative_phase, amplitude, omega):
+            file.write(f"{t:.15f} {cp:.15f} {a:.15f} {o:.15f}\n")
 
     print(f"Processed data has been saved to {output_file}")
 
