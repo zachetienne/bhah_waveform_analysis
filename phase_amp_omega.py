@@ -3,10 +3,10 @@ import numpy as np
 def read_ascii_file(file_name):
     """
     Reads a 3-column ASCII file, skipping lines that start with '#'.
-    
+
     Args:
         file_name (str): The name of the file to read.
-        
+
     Returns:
         tuple: A tuple containing three numpy arrays (time, real, imag).
     """
@@ -31,16 +31,37 @@ def read_ascii_file(file_name):
 
     return time, real, imag
 
+def compute_derivative(time, data):
+    """
+    Calculates the time derivative of the input data using a second-order finite difference stencil.
+
+    Args:
+        time (numpy.ndarray): A numpy array containing time values.
+        data (numpy.ndarray): A numpy array containing the data to be differentiated.
+
+    Returns:
+        numpy.ndarray: A numpy array containing the time derivative of the input data.
+    """
+    dt = time[1] - time[0]
+    derivative = np.zeros_like(data)
+    # Second-order in the interior:
+    derivative[1:-1] = (data[2:] - data[:-2]) / (2 * dt)
+    # Drop to first-order at the endpoints
+    derivative[0] = (data[1] - data[0]) / dt
+    derivative[-1] = (data[-1] - data[-2]) / dt
+
+    return derivative
+
 
 def process_wave_data(time, real, imag):
     """
     Calculates the cumulative phase and amplitude of a gravitational wave signal.
-    
+
     Args:
         time (numpy.ndarray): A numpy array containing time values.
         real (numpy.ndarray): A numpy array containing the real part of the signal.
         imag (numpy.ndarray): A numpy array containing the imaginary part of the signal.
-        
+
     Returns:
         tuple: A tuple containing three numpy arrays (time, cumulative_phase, amplitude).
     """
@@ -79,7 +100,13 @@ def process_wave_data(time, real, imag):
         # Update the `last_phase` variable with the current phase value.
         last_phase = ph
 
-    return time, np.array(cum_phase, dtype=np.float64), amplitude
+    # Calculate the cumulative phase for the current time step and append it to the `cum_phase` list.
+    cum_phase = np.array(cum_phase, dtype=np.float64)
+
+    # Compute the time derivative of the cumulative phase using a second-order finite difference stencil.
+    cum_phase_derivative = compute_derivative(time, cum_phase)
+
+    return time, cum_phase, amplitude, cum_phase_derivative
 
 import sys
 
