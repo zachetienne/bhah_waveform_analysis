@@ -232,20 +232,22 @@ def main():
     print(f"Processed data has been saved to {output_file}")
 
     min_omega = fit_quadratic_and_output_min_omega(time, omega)
-    min_freq  = min_omega / (2 * np.pi)
-    frequencies, fft_data = perform_complex_fft(time, real, imag)
 
-    for i, freq in enumerate(frequencies):
-        omega = 2*np.pi*freq
-        if(omega < min_omega):
-            fft_data[i] *= (-1j / min_freq) ** 2
+    # Perform the FFT
+    fft_result = np.fft.fft(real + 1j * imag)
+
+    # Calculate angular frequencies
+    omega_list = np.fft.fftfreq(len(time), time[1] - time[0]) * 2 * np.pi
+
+    # Just below Eq. 27 in https://arxiv.org/abs/1006.1632
+    for i, omega in enumerate(omega_list):
+        if np.fabs(omega) <= min_omega:
+            fft_result[i] *= 1 / (1j * min_omega) ** 2
         else:
-            fft_data[i] *= (-1j / freq) ** 2
-
-    print(fft_data)
+            fft_result[i] *= 1 / (1j * np.fabs(omega)) ** 2
 
     # Now perform the inverse FFT
-    second_integral_complex = np.fft.ifft(fft_data)
+    second_integral_complex = np.fft.ifft(fft_result)
 
     # Separate the real and imaginary parts of the second time integral
     second_integral_real = np.real(second_integral_complex)
