@@ -1,38 +1,48 @@
 import numpy as np
+import re
 from scipy.optimize import curve_fit
 
-def read_ascii_file(file_name):
+def read_psi4(file_name):
     """
-    Reads a 3-column ASCII file, skipping lines that start with '#'.
+    Reads an ASCII file with a header describing the real and imaginary parts of the data for each mode.
+    Returns the data in a convenient format to access the real and imaginary parts given l, m values.
 
     Args:
         file_name (str): The name of the file to read.
 
     Returns:
-        tuple: A tuple containing three numpy arrays (time, real, imag).
+        tuple: A tuple containing the time numpy array and a dictionary with keys (l, m) containing the data.
     """
-    data = []
+    mode_data = {}
+    time_data = []
 
     with open(file_name, 'r') as file:
-        for line in file:
-            if not line.startswith('#'):
-                columns = line.split()
-                data.append([np.float64(columns[0]), np.float64(columns[1]), np.float64(columns[2])])
+        # Read the lines and ignore lines starting with #
+        lines = [line for line in file.readlines() if not line.startswith('#')]
 
-    # Convert data to a numpy array and sort by the time column (leftmost column)
-    data = np.array(data, dtype=np.float64)
-    data = data[data[:, 0].argsort()]
+    # Convert lines to arrays and sort by time
+    data = np.array([list(map(np.float64, line.split())) for line in lines])
+    data = data[np.argsort(data[:, 0])]
 
     # Remove duplicate times
-    unique_indices = np.unique(data[:, 0], return_index=True)[1]
-    data = data[unique_indices]
+    _, index = np.unique(data[:, 0], return_index=True)
+    data = data[index]
 
-    # Split the data back into time, real, and imag arrays
-    time, real, imag = data[:, 0], data[:, 1], data[:, 2]
+    # Store time data
+    time_data = data[:, 0]
 
-    return time, real, imag
+    # Extract l from the filename
+    l = int(file_name.split('_')[1][1:].split('-')[0])
 
-def compute_derivative(time, data):
+    # Loop through columns and store real and imaginary parts in mode_data
+    for m in range(-l, l + 1):
+        idx = 1 + 2 * (m + l)  # Calculate the index of the real part
+        mode_data[(l, m)] = data[:, idx], data[:, idx + 1]
+
+    return time_data, mode_data
+
+
+def compute_first_derivative(time, data):
     """
     Calculates the time derivative of the input data using a second-order finite difference stencil.
 
@@ -52,6 +62,33 @@ def compute_derivative(time, data):
     derivative[-1] = (data[-1] - data[-2]) / dt
 
     return derivative
+
+def compute_second_derivative(time, data):
+    """
+    Computes the second time derivative of the input data using the second-order finite difference method,
+    with upwind/downwind stencils for the endpoints.
+
+    Args:
+        time (numpy.ndarray): A numpy array containing time values.
+        data (numpy.ndarray): A numpy array containing data for which the second time derivative is to be calculated.
+
+    Returns:
+        numpy.ndarray: A numpy array containing the second time derivative of the input data.
+    """
+    dt = time[1] - time[0]
+    n = len(data)
+    second_derivative = np.zeros(n)
+
+    # Interior points using central finite difference
+    second_derivative[1:-1] = (data[:-2] - 2 * data[1:-1] + data[2:]) / (dt ** 2)
+
+    # Endpoint 0: forward finite difference (downwind)
+    second_derivative[0] = (2 * data[0] - 5 * data[1] + 4 * data[2] - data[3]) / (dt ** 2)
+
+    # Endpoint n-1: backward finite difference (upwind)
+    second_derivative[-1] = (2 * data[-1] - 5 * data[-2] + 4 * data[-3] - data[-4]) / (dt ** 2)
+
+    return second_derivative
 
 
 def process_wave_data(time, real, imag):
@@ -105,7 +142,7 @@ def process_wave_data(time, real, imag):
     cum_phase = np.array(cum_phase, dtype=np.float64)
 
     # Compute the time derivative of the cumulative phase using a second-order finite difference stencil.
-    cum_phase_derivative = compute_derivative(time, cum_phase)
+    cum_phase_derivative = compute_first_derivative(time, cum_phase)
 
     return time, cum_phase, amplitude, cum_phase_derivative
 
@@ -125,11 +162,39 @@ def fit_quadratic_and_output_min_omega(time, omega):
     # Find the extremum value of the quadratic curve
     a, b, c = params
     extremum_x = -b / (2 * a)
-    omega_min_quad_fit = quadratic(extremum_x, a, b, c)
-    omega_at_t_zero = quadratic(0.0, a, b, c)
+    omega_min_quad_fit = np.fabs(quadratic(extremum_x, a, b, c))
+    omega_at_t_zero = np.fabs(quadratic(0.0, a, b, c))
 
     print(f"The extremum of the quadratic curve occurs at t = {extremum_x:.15f} with omega = {omega_min_quad_fit:.15f} . implied omega(t=0) = {omega_at_t_zero:.15f}")
+    return np.fabs(omega_at_t_zero)
     
+import numpy as np
+
+def perform_complex_fft(time, real, imag):
+    """
+    Performs a complex Fast Fourier Transform (FFT) on the input time, real, and imaginary data.
+
+    Args:
+        time (numpy.ndarray): A numpy array containing time values.
+        real (numpy.ndarray): A numpy array containing the real part of the signal.
+        imag (numpy.ndarray): A numpy array containing the imaginary part of the signal.
+
+    Returns:
+        tuple: A tuple containing two numpy arrays (frequencies, fft_data).
+    """
+    # Combine the real and imaginary data into a single complex signal
+    complex_signal = real + 1j * imag
+
+    # Perform the complex FFT
+    fft_data = np.fft.fft(complex_signal)
+
+    # Calculate the frequency values
+    dt = time[1] - time[0]
+    n = len(time)
+    frequencies = np.fft.fftfreq(n, d=dt)
+
+    return frequencies, fft_data
+
     
 def main():
     """
@@ -146,11 +211,13 @@ def main():
         print("Error: Input file must have a '.asc' or '.txt' extension.")
         sys.exit(1)
 
-    time, real, imag = read_ascii_file(file_name)
+    time, mode_data = read_psi4(file_name)
+    real, imag = mode_data[(2, 2)]
+    print(real, imag)
+
     time, cumulative_phase, amplitude, omega = process_wave_data(time, real, imag)
 
-    fit_quadratic_and_output_min_omega(time, omega)
-
+    
     output_file = file_name
     if file_name.endswith('.asc'):
         output_file = output_file.replace('.asc', '_phase_amp_omega.asc')
@@ -164,5 +231,49 @@ def main():
 
     print(f"Processed data has been saved to {output_file}")
 
+    min_omega = fit_quadratic_and_output_min_omega(time, omega)
+    min_freq  = min_omega / (2 * np.pi)
+    frequencies, fft_data = perform_complex_fft(time, real, imag)
+
+    for i, freq in enumerate(frequencies):
+        omega = 2*np.pi*freq
+        if(omega < min_omega):
+            fft_data[i] *= (-1j / min_freq) ** 2
+        else:
+            fft_data[i] *= (-1j / freq) ** 2
+
+    print(fft_data)
+
+    # Now perform the inverse FFT
+    second_integral_complex = np.fft.ifft(fft_data)
+
+    # Separate the real and imaginary parts of the second time integral
+    second_integral_real = np.real(second_integral_complex)
+    second_integral_imag = np.imag(second_integral_complex)
+    
+    # Save the output to a file with _strain.{asc or txt} extension
+    output_file = file_name
+    if file_name.endswith('.asc'):
+        output_file = output_file.replace('.asc', '_strain.asc')
+    elif file_name.endswith('.txt'):
+        output_file = output_file.replace('.txt', '_strain.txt')
+
+    with open(output_file, 'w') as file:
+        file.write("# Time    Second_Integral_Real    Second_Integral_Imag\n")
+        for t, real, imag in zip(time, second_integral_real, second_integral_imag):
+            file.write(f"{t:.15f} {real:.15f} {imag:.15f}\n")
+
+    print(f"Second time integral data has been saved to {output_file}")
+
+    # Calculate the second time derivative of second_integral_real and second_integral_imag
+    second_derivative_real = compute_second_derivative(time, second_integral_real)
+    second_derivative_imag = compute_second_derivative(time, second_integral_imag)
+    with open("check.txt", 'w') as file:
+        file.write("# Time    Second_Integral_Real    Second_Integral_Imag\n")
+        for t, real, imag in zip(time, second_derivative_real, second_derivative_imag):
+            file.write(f"{t:.15f} {real:.15f} {imag:.15f}\n")
+    
+
+    
 if __name__ == "__main__":
     main()
