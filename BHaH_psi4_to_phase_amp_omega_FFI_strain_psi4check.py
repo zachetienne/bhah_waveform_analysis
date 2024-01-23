@@ -18,10 +18,24 @@ from numpy.typing import NDArray
 from scipy.optimize import curve_fit  # type: ignore
 
 
-def read_BHaH_psi4_file(
-    file_name: str,
+def construct_generic_filename(radius: float) -> str:
+    """
+    Construct a filename based on the input radius following a specific format.
+
+    :param radius: The radius value to be included in the filename.
+    :return: A string representing the constructed filename.
+
+    >>> construct_generic_filename(24.0)
+    'Rpsi4_l[MODENUM]-r0024.0.txt'
+    >>> construct_generic_filename(1124.2)
+    'Rpsi4_l[MODENUM]-r1124.2.txt'
+    """
+    return f"Rpsi4_l[MODENUM]-r{radius:06.1f}.txt"
+
+
+def read_BHaH_psi4_files(
+    generic_file_name: str,
 ) -> Tuple[
-    float,
     NDArray[np.float64],
     Dict[Tuple[int, int], Tuple[NDArray[np.float64], NDArray[np.float64]]],
 ]:
@@ -29,58 +43,48 @@ def read_BHaH_psi4_file(
     Read an ASCII file with a header describing the real and imaginary parts of the data for each mode.
     Return the data in a format to access the real and imaginary parts given l, m values.
 
-    :param file_name: The name of the file to read.
+    :param generic_file_name: The name of the file to read.
     :return: A tuple containing the time numpy array and a dictionary with keys (l, m) containing the data.
+    :raises ValueError: If the length of time data is inconsistent across different ell values.
     """
+    mode_data: Dict[
+        Tuple[int, int], Tuple[NDArray[np.float64], NDArray[np.float64]]
+    ] = {}
 
-    def extract_radius_from_filename(filename: str) -> float:
-        """
-        Extracts the radius value from a given filename.
+    time_data_size: int = -1
+    for ell in range(2, 9):
+        file_name = generic_file_name.replace("[MODENUM]", str(ell))
+        print(f"Reading file {file_name}...")
+        with open(file_name, mode="r", encoding="utf-8") as file:
+            # Read the lines and ignore lines starting with '#'
+            lines = [line for line in file.readlines() if not line.startswith("#")]
 
-        :param filename: The filename in the format 'Rpsi4_lX-rYYYY.Z.txt'
-        :return: The extracted radius value as a float.
+        # Convert lines to arrays and sort by time
+        data: NDArray[np.float64] = np.array(
+            [list(map(np.float64, line.split())) for line in lines]
+        )
+        data = data[np.argsort(data[:, 0])]
 
-        :raises ValueError: If the filename format is incorrect.
-        """
+        # Remove duplicate times
+        _, index = np.unique(data[:, 0], return_index=True)
+        data = data[index]
 
-        try:
-            # Split the filename on '-r' and take the second part
-            # Then split on '.' and take the first part to get the radius value
-            radius_str = filename.split("-r")[1].split(".")[0]
+        # Store time data
+        time_data: NDArray[np.float64] = data[:, 0]
+        if time_data_size < 0:
+            time_data_size = len(time_data)
+        else:
+            if time_data_size != len(time_data):
+                raise ValueError(
+                    f"Inconsistent time data size for ell={ell}. Expected {time_data_size}, got {len(time_data)}."
+                )
 
-            # Convert the radius string to float
-            radius = float(radius_str)
+        # Loop through columns and store real and imaginary parts in mode_data
+        for m in range(-ell, ell + 1):
+            idx = 1 + 2 * (m + ell)  # Calculate the index of the real part
+            mode_data[(ell, m)] = (data[:, idx], data[:, idx + 1])
 
-            return radius
-        except (IndexError, ValueError) as exc:
-            raise ValueError("Invalid filename format.") from exc
-
-    mode_data = {}
-
-    with open(file_name, mode="r", encoding="utf-8") as file:
-        # Read the lines and ignore lines starting with #
-        lines = [line for line in file.readlines() if not line.startswith("#")]
-
-    # Convert lines to arrays and sort by time
-    data = np.array([list(map(np.float64, line.split())) for line in lines])
-    data = data[np.argsort(data[:, 0])]
-
-    # Remove duplicate times
-    _, index = np.unique(data[:, 0], return_index=True)
-    data = data[index]
-
-    # Store time data
-    time_data = data[:, 0]
-
-    # Extract l from the filename
-    l = int(file_name.split("_")[1][1:].split("-")[0])
-
-    # Loop through columns and store real and imaginary parts in mode_data
-    for m in range(-l, l + 1):
-        idx = 1 + 2 * (m + l)  # Calculate the index of the real part
-        mode_data[(l, m)] = data[:, idx], data[:, idx + 1]
-
-    return extract_radius_from_filename(file_name), time_data, mode_data
+    return time_data, mode_data
 
 
 def compute_first_derivative_in_time(
@@ -287,6 +291,49 @@ def perform_complex_fft(
     return frequencies, fft_data
 
 
+def extract_min_omega_ell2_m2(
+    extraction_radius: float,
+    time_arr: NDArray[np.float64],
+    mode_data: Dict[Tuple[int, int], Tuple[NDArray[np.float64], NDArray[np.float64]]],
+) -> float:
+    """
+    Extracts and saves the phase, amplitude, and omega data for l=m=2 mode from psi4 wave.
+    Also fits a quadratic to omega and finds its minimum.
+
+    :param extraction_radius: The extraction radius.
+    :param time_arr: Array of time data.
+    :param mode_data: Dictionary containing the mode data.
+    :return: A tuple with parameters from the fit quadratic to omega (minimum value, vertex, curvature).
+    """
+    real_ell2_m2, imag_ell2_m2 = mode_data[(2, 2)]
+
+    (
+        time_arr,
+        cumulative_phase_ell2_m2,
+        amplitude_ell2_m2,
+        omega_ell2_m2,
+    ) = compute_psi4_wave_phase_and_amplitude(time_arr, real_ell2_m2, imag_ell2_m2)
+
+    phase_amp_omega_file = (
+        f"Rpsi4_r{extraction_radius:06.1f}_ell2_m2_phase_amp_omega.txt"
+    )
+
+    with open(phase_amp_omega_file, mode="w", encoding="utf-8") as file:
+        file.write("# Time    cumulative_phase    amplitude    omega\n")
+        for t, cp, a, o in zip(
+            time_arr, cumulative_phase_ell2_m2, amplitude_ell2_m2, omega_ell2_m2
+        ):
+            file.write(f"{t:.15f} {cp:.15f} {a:.15f} {o:.15f}\n")
+
+    print(
+        f"phase, amplitude, omega data for l=m=2 have been saved to {phase_amp_omega_file}"
+    )
+
+    return fit_quadratic_to_omega_and_find_minimum(
+        extraction_radius, time_arr, omega_ell2_m2
+    )
+
+
 def main() -> None:
     """
     Main function that reads the gravitational wave data file and the dimensionless
@@ -295,82 +342,110 @@ def main() -> None:
     """
     if len(sys.argv) != 2:
         raise RuntimeError(
-            "Usage: python3 psi4_to_phase_amp_omega_FFI_strain_psi4check.py <gravitational_wave_data.asc or .txt>"
+            "Usage: python3 BHaH_psi4_to_phase_amp_omega_FFI_strain_psi4check.py <extraction radius (r/M)>"
         )
+    extraction_radius = float(sys.argv[1])
+    generic_file_name = construct_generic_filename(extraction_radius)
 
-    file_name = sys.argv[1]
+    time_arr, mode_data = read_BHaH_psi4_files(generic_file_name)
 
-    if not (file_name.endswith(".asc") or file_name.endswith(".txt")):
-        raise ValueError("Error: Input file must have a '.asc' or '.txt' extension.")
-
-    r_over_M, time, mode_data = read_BHaH_psi4_file(file_name)
-    real, imag = mode_data[(2, 2)]
-    # print(real, imag)
-
-    time, cumulative_phase, amplitude, omega = compute_psi4_wave_phase_and_amplitude(
-        time, real, imag
+    min_omega_ell2_m2 = extract_min_omega_ell2_m2(
+        extraction_radius, time_arr, mode_data
     )
 
-    output_file = (
-        file_name.replace(".asc", "_phase_amp_omega.asc")
-        if file_name.endswith(".asc")
-        else file_name.replace(".txt", "_phase_amp_omega.txt")
-    )
+    # Next loop over modes and perform an FFT:
+    strain_data: Dict[
+        Tuple[int, int], Tuple[NDArray[np.float64], NDArray[np.float64]]
+    ] = {}
 
-    with open(output_file, mode="w", encoding="utf-8") as file:
-        file.write("# Time    cumulative_phase    amplitude    omega\n")
-        for t, cp, a, o in zip(time, cumulative_phase, amplitude, omega):
-            file.write(f"{t:.15f} {cp:.15f} {a:.15f} {o:.15f}\n")
+    ddot_strain_data: Dict[
+        Tuple[int, int], Tuple[NDArray[np.float64], NDArray[np.float64]]
+    ] = {}  # Second time derivative of strain data
 
-    print(f"Processed data has been saved to {output_file}")
+    for ell in range(2, 9):
+        for m in range(-ell, ell + 1):
+            min_omega_m = np.fabs(m) * min_omega_ell2_m2 / 2.0
 
-    min_omega = fit_quadratic_to_omega_and_find_minimum(r_over_M, time, omega)
+            real_ell_m, imag_ell_m = mode_data[(ell, m)]
 
-    # Perform the FFT
-    fft_result = np.fft.fft(real + 1j * imag)
+            # Perform the FFT
+            fft_result = np.fft.fft(real_ell_m + 1j * imag_ell_m)
 
-    # Calculate angular frequencies
-    omega_list = np.fft.fftfreq(len(time), time[1] - time[0]) * 2 * np.pi
+            # Calculate angular frequencies
+            omega_list = (
+                np.fft.fftfreq(len(time_arr), time_arr[1] - time_arr[0]) * 2 * np.pi
+            )
 
-    # Just below Eq. 27 in https://arxiv.org/abs/1006.1632
-    for i, omega in enumerate(omega_list):
-        if np.fabs(omega) <= min_omega:
-            fft_result[i] *= 1 / (1j * min_omega) ** 2
-        else:
-            fft_result[i] *= 1 / (1j * np.fabs(omega)) ** 2
+            # Just below Eq. 27 in https://arxiv.org/abs/1006.1632
+            if m != 0:
+                # Don't filter m==0
+                for i, omega in enumerate(omega_list):
+                    if np.fabs(omega) <= min_omega_m:
+                        fft_result[i] *= 1 / (1j * min_omega_m) ** 2
+                    else:
+                        fft_result[i] *= 1 / (1j * np.fabs(omega)) ** 2
 
-    # Now perform the inverse FFT
-    second_integral_complex = np.fft.ifft(fft_result)
+            # Now perform the inverse FFT
+            second_integral_complex = np.fft.ifft(fft_result)
 
-    # Separate the real and imaginary parts of the second time integral
-    second_integral_real = np.real(second_integral_complex)
-    second_integral_imag = np.imag(second_integral_complex)
+            # Separate the real and imaginary parts of the second time integral
+            second_integral_real = np.real(second_integral_complex)
+            second_integral_imag = np.imag(second_integral_complex)
 
-    # Save the output to a file with _strain.{asc or txt} extension
-    output_file = file_name
-    if file_name.endswith(".asc"):
-        output_file = output_file.replace(".asc", "_strain.asc")
-    elif file_name.endswith(".txt"):
-        output_file = output_file.replace(".txt", "_strain.txt")
+            strain_data[(ell, m)] = (second_integral_real, second_integral_imag)
 
-    with open(output_file, mode="w", encoding="utf-8") as file:
-        file.write("# Time    Second_Integral_Real    Second_Integral_Imag\n")
-        for t, real, imag in zip(time, second_integral_real, second_integral_imag):
-            file.write(f"{t:.15f} {real:.15f} {imag:.15f}\n")
+            # Calculate the second time derivative of second_integral_real and second_integral_imag
+            second_derivative_real = compute_second_derivative_in_time(
+                time_arr, second_integral_real
+            )
+            second_derivative_imag = compute_second_derivative_in_time(
+                time_arr, second_integral_imag
+            )
+            ddot_strain_data[(ell, m)] = (
+                second_derivative_real,
+                second_derivative_imag,
+            )
 
-    print(f"Second time integral data has been saved to {output_file}")
+    for ell in range(2, 9):
+        # Save the strain output to a file with _conv_to_strain.txt extension
+        strain_file = f"Rpsi4_r{extraction_radius:06.1f}_l{ell}_conv_to_strain.txt"
+        with open(strain_file, mode="w", encoding="utf-8") as file:
+            column = 1
+            file.write(f"# column {column}: t-R_ext = [retarded time]\n")
+            column += 1
+            for m in range(-ell, ell + 1):
+                file.write(f"# column {column}: Re(h_{{l={ell},m={m}}}) * R_ext\n")
+                column += 1
+            for i, time in enumerate(time_arr):
+                out_str = str(time)
+                for m in range(-ell, ell + 1):
+                    out_str += (
+                        f" {strain_data[(ell,m)][0][i]} {strain_data[ell,m][1][i]}"
+                    )
+                file.write(out_str + "\n")
+        print(f"Strain data have been saved to {strain_file}")
 
-    # Calculate the second time derivative of second_integral_real and second_integral_imag
-    second_derivative_real = compute_second_derivative_in_time(
-        time, second_integral_real
-    )
-    second_derivative_imag = compute_second_derivative_in_time(
-        time, second_integral_imag
-    )
-    with open("check.txt", mode="w", encoding="utf-8") as file:
-        file.write("# Time    Second_Integral_Real    Second_Integral_Imag\n")
-        for t, real, imag in zip(time, second_derivative_real, second_derivative_imag):
-            file.write(f"{t:.15f} {real:.15f} {imag:.15f}\n")
+        # Save the strain->psi4 output to a file with _from_strain.txt extension
+        ddot_file = f"Rpsi4_r{extraction_radius:06.1f}_l{ell}_from_strain.txt"
+        with open(ddot_file, mode="w", encoding="utf-8") as file:
+            column = 1
+            file.write(f"# column {column}: t-R_ext = [retarded time]\n")
+            column += 1
+            for m in range(-ell, ell + 1):
+                file.write(f"# column {column}: Re(Psi4_{{l={ell},m={m}}}) * R_ext\n")
+                column += 1
+            for i, time in enumerate(time_arr):
+                out_str = str(time)
+                for m in range(-ell, ell + 1):
+                    out_str += f" {ddot_strain_data[(ell,m)][0][i]} {ddot_strain_data[ell,m][1][i]}"
+                file.write(out_str + "\n")
+
+        # with open("check.txt", mode="w", encoding="utf-8") as file:
+        #     file.write("# Time    Second_Integral_Real    Second_Integral_Imag\n")
+        #     for t, real, imag in zip(
+        #         time_arr, second_derivative_real, second_derivative_imag
+        #     ):
+        #         file.write(f"{t:.15f} {real:.15f} {imag:.15f}\n")
 
 
 if __name__ == "__main__":
