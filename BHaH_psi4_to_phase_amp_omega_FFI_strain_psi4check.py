@@ -384,6 +384,11 @@ def main() -> None:
                         fft_result[i] *= 1 / (1j * min_omega_m) ** 2
                     else:
                         fft_result[i] *= 1 / (1j * np.fabs(omega)) ** 2
+            else:
+                for i, omega in enumerate(omega_list):
+                    # Ignore the zero frequency mode.
+                    if omega != 0:
+                        fft_result[i] *= 1 / (1j * np.fabs(omega)) ** 2
 
             # Now perform the inverse FFT
             second_integral_complex = np.fft.ifft(fft_result)
