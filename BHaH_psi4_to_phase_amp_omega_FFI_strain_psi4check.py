@@ -416,6 +416,8 @@ def main() -> None:
             for m in range(-ell, ell + 1):
                 file.write(f"# column {column}: Re(h_{{l={ell},m={m}}}) * R_ext\n")
                 column += 1
+                file.write(f"# column {column}: Im(h_{{l={ell},m={m}}}) * R_ext\n")
+                column += 1
             for i, time in enumerate(time_arr):
                 out_str = str(time)
                 for m in range(-ell, ell + 1):
@@ -433,6 +435,8 @@ def main() -> None:
             column += 1
             for m in range(-ell, ell + 1):
                 file.write(f"# column {column}: Re(Psi4_{{l={ell},m={m}}}) * R_ext\n")
+                column += 1
+                file.write(f"# column {column}: Im(Psi4_{{l={ell},m={m}}}) * R_ext\n")
                 column += 1
             for i, time in enumerate(time_arr):
                 out_str = str(time)
