@@ -364,7 +364,8 @@ def main() -> None:
 
     for ell in range(2, 9):
         for m in range(-ell, ell + 1):
-            min_omega_m = np.fabs(m) * min_omega_ell2_m2 / 2.0
+            # min_omega_m = np.fabs(m) * min_omega_ell2_m2 / 2.0
+            min_omega = min_omega_ell2_m2  # The angular frequency of the l=m=2 mode at t=0 should be the minimum physical omega other than GW memory.
 
             real_ell_m, imag_ell_m = mode_data[(ell, m)]
 
@@ -377,18 +378,11 @@ def main() -> None:
             )
 
             # Just below Eq. 27 in https://arxiv.org/abs/1006.1632
-            if m != 0:
-                # Don't filter m==0
-                for i, omega in enumerate(omega_list):
-                    if np.fabs(omega) <= min_omega_m:
-                        fft_result[i] *= 1 / (1j * min_omega_m) ** 2
-                    else:
-                        fft_result[i] *= 1 / (1j * np.fabs(omega)) ** 2
-            else:
-                for i, omega in enumerate(omega_list):
-                    # Ignore the zero frequency mode.
-                    if omega != 0:
-                        fft_result[i] *= 1 / (1j * np.fabs(omega)) ** 2
+            for i, omega in enumerate(omega_list):
+                if np.fabs(omega) <= min_omega:
+                    fft_result[i] *= 1 / (1j * min_omega) ** 2
+                else:
+                    fft_result[i] *= 1 / (1j * np.fabs(omega)) ** 2
 
             # Now perform the inverse FFT
             second_integral_complex = np.fft.ifft(fft_result)
