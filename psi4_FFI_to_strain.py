@@ -1,94 +1,245 @@
 """
 This module processes gravitational wave data from numerical relativity simulations.
-It provides functions to read waveform data files, compute derivatives, process wave data,
-perform complex Fast Fourier Transforms (FFT), and fit data to a quadratic function.
-The main functionality involves reading gravitational wave data, extracting relevant
-information like the phase and amplitude, and performing analysis like FFT and
-quadratic fitting to extract physical properties from the waveforms.
-It's designed to work with ASCII files containing gravitational wave data from simulations.
+
+The module reads a directory of ASCII files of various ell values of waveform data, computes phase and amplitude data,
+calculates a minimum data frequency using a quadratic fit of the monotonic phase of  ell2 m2 data,
+and uses a Fast Fourier Transform to compute the second time integral of the waveform, (the strain).
+The module computes a second derivative of the result to check against the original data.
+
+The phase and amplitude, the second integral, and the twice integrated-twice differentiated data is saved to txt files.
+The primary function returns the second integral data as a numpy array with the various ell-values.
 
 Author: Zachariah B. Etienne
         zachetie **at** gmail **dot* com
 """
-import sys
-from typing import Tuple, Dict
 
+import sys
+import os
+from typing import List, Tuple
 import numpy as np
 from numpy.typing import NDArray
-from scipy.optimize import curve_fit  # type: ignore
+from scipy.optimize import curve_fit
 
 
-def construct_generic_filename(radius: float) -> str:
+INPUT_DIR = "../BH_VIS/data/r100" # changeable in animation_main.py
+OUTPUT_DIR = "../BH_VIS/data/r100_strain"
+FILE_PATTERN = "_l[MODE=L]-"
+ELL_MIN = 2
+ELL_MAX = 8
+EXT_RAD = 100 # changeable in animation_main.py
+INTERVAL = 200
+CUTTOFF_FACTOR = 0.75
+STATUS_MESSAGES = True
+WRITE_FILES = True # changeable in animation_main.py
+
+
+def read_psi4_dir() -> tuple[np.ndarray, np.ndarray]:
     """
-    Construct a filename based on the input radius following a specific format.
+    Reads data from psi4 output directory and returns time and mode data.
 
-    :param radius: The radius value to be included in the filename.
-    :return: A string representing the constructed filename.
-
-    >>> construct_generic_filename(24.0)
-    'Rpsi4_l[MODENUM]-r0024.0.txt'
-    >>> construct_generic_filename(1124.2)
-    'Rpsi4_l[MODENUM]-r1124.2.txt'
+    :return: tuple[np.ndarray, np.ndarray]
+        - time_data: Array of numpy.float64 time values (shape: (n_times,) ).
+        - mode_data: 2D Array for modes of numpy.complex128 data (shape: (2*l+1, n_times,) ).
     """
-    return f"Rpsi4_l[MODENUM]-r{radius:06.1f}.txt"
 
+    time_data: list[np.ndarray] = []
+    psi4_modes_data: list[np.ndarray] = []
+    n_times = -1
 
-def read_BHaH_psi4_files(
-    generic_file_name: str,
-) -> Tuple[
-    NDArray[np.float64],
-    Dict[Tuple[int, int], Tuple[NDArray[np.float64], NDArray[np.float64]]],
-]:
-    """
-    Read an ASCII file with a header describing the real and imaginary parts of the data for each mode.
-    Return the data in a format to access the real and imaginary parts given l, m values.
-
-    :param generic_file_name: The name of the file to read.
-    :return: A tuple containing the time numpy array and a dictionary with keys (l, m) containing the data.
-    :raises ValueError: If the length of time data is inconsistent across different ell values.
-    """
-    mode_data: Dict[
-        Tuple[int, int], Tuple[NDArray[np.float64], NDArray[np.float64]]
-    ] = {}
-
-    time_data_size: int = -1
-    for ell in range(2, 9):
-        file_name = generic_file_name.replace("[MODENUM]", str(ell))
-        print(f"Reading file {file_name}...")
-        with open(file_name, mode="r", encoding="utf-8") as file:
-            # Read the lines and ignore lines starting with '#'
+    for ell in range(ELL_MIN, ELL_MAX + 1):
+        filepath = find_file_for_l(ell)
+        with open(filepath, "r", encoding="utf-8") as file:
             lines = [line for line in file.readlines() if not line.startswith("#")]
+        data = np.array([np.array(line.split(), dtype=np.float64) for line in lines])
 
-        # Convert lines to arrays and sort by time
-        data: NDArray[np.float64] = np.array(
-            [list(map(np.float64, line.split())) for line in lines]
-        )
-        data = data[np.argsort(data[:, 0])]
+        time_data, index = np.unique(
+            data[:, 0], return_index=True
+        )  # sorts by time, removing duplicates
+        data = data[index]  # sorts data accordningly
 
-        # Remove duplicate times
-        _, index = np.unique(data[:, 0], return_index=True)
-        data = data[index]
+        if n_times == -1:
+            n_times = len(time_data)
 
-        # Store time data
-        time_data: NDArray[np.float64] = data[:, 0]
-        if time_data_size < 0:
-            time_data_size = len(time_data)
-        else:
-            if time_data_size != len(time_data):
-                raise ValueError(
-                    f"Inconsistent time data size for ell={ell}. Expected {time_data_size}, got {len(time_data)}."
-                )
+        if n_times != len(time_data):
+            raise ValueError(
+                f"Inconsistent times for l={ell}. Expected {n_times}, got {len(time_data)}."
+            )
 
-        # Loop through columns and store real and imaginary parts in mode_data
-        for m in range(-ell, ell + 1):
-            idx = 1 + 2 * (m + ell)  # Calculate the index of the real part
-            mode_data[(ell, m)] = (data[:, idx], data[:, idx + 1])
-
-    return time_data, mode_data
+        real_idx = 1
+        for _ in range(2 * ell + 1):
+            psi4_modes_data.append(data[:, real_idx] + 1j * data[:, real_idx + 1])
+            real_idx += 2
+    return np.array(time_data), np.array(psi4_modes_data)
 
 
-def compute_first_derivative_in_time(
-    time: NDArray[np.float64], data: NDArray[np.float64]
+def psi4_ffi_to_strain():
+    """
+    Calculates the strain modes from PSI4 data using FFI.
+
+    Returns:
+        A numpy array of numpy arrays representing the strain modes.
+
+    Raises:
+        IOError: If there is an error reading the PSI4 data or writing strain data.
+        ValueError: If the lengths of the time and data arrays are not equal.
+    """
+
+    try:
+        time_arr, psi4_modes_data = read_psi4_dir()
+    except IOError as e:
+        raise IOError(f"Error reading PSI4 data: {e}") from e
+
+    # Get minimum frequency cutoff from l=m=2 mode
+    min_omega_l2m2 = extract_min_omega_ell2_em2(
+        time_arr, psi4_modes_data[get_index_from_modes(2, 2)]
+    )
+    freq_cutoff = CUTTOFF_FACTOR * min_omega_l2m2
+
+    # Initialize arrays for strain modes and their second time derivatives
+    strain_modes = np.zeros_like(psi4_modes_data)
+    strain_modes_ddot = np.zeros_like(psi4_modes_data)
+
+    # Calculate frequency list for FFT
+    freq_list = np.fft.fftfreq(len(time_arr), time_arr[1] - time_arr[0]) * 2 * np.pi
+
+    # Next loop over modes and perform an FFT:
+    mode_idx = 0
+    for ell in range(ELL_MIN, ELL_MAX + 1):
+        for em in range(-ell, ell + 1):
+            # Apply FFT and filter, see Eq. 27 in https://arxiv.org/abs/1006.1632
+            fft_result = np.fft.fft(psi4_modes_data[get_index_from_modes(ell, em)])
+            for i, freq in enumerate(freq_list):
+                if np.fabs(freq) <= np.fabs(freq_cutoff):
+                    fft_result[i] *= 1 / (1j * freq_cutoff) ** 2
+                else:
+                    fft_result[i] *= 1 / (1j * freq) ** 2
+            # Inverse FFT to get strain
+            strain_modes[mode_idx] = np.fft.ifft(fft_result)
+
+            # Calculate second time derivative
+            strain_modes_ddot[mode_idx] = second_time_derivative(
+                time_arr, strain_modes[mode_idx]
+            )
+            mode_idx += 1
+
+    # Save the strain output to a file with _conv_to_strain.txt extension
+    if OUTPUT_DIR != "":
+        for ell in range(ELL_MIN, ELL_MAX + 1):
+            strain_filename = f"Rpsi4_r{EXT_RAD:06.1f}_l{ell}_conv_to_strain.txt"
+            ddot_filename = f"Rpsi4_r{EXT_RAD:06.1f}_l{ell}_from_strain.txt"
+            labels = []
+            strain_cols = []
+            ddot_cols = []
+            col = 0
+
+            labels.append(f"# column {col}: t-R_ext = [retarded time]")
+            strain_cols.append(time_arr)
+            col += 1
+
+            for em in range(-ell, ell + 1):
+                mode_data = strain_modes[get_index_from_modes(ell, em)]
+                ddot_data = strain_modes_ddot[get_index_from_modes(ell, em)]
+
+                labels.append(f"# column {col}: Re(h_{{l={ell},m={em}}}) * R_ext")
+                strain_cols.append(mode_data.real)
+                ddot_cols.append(ddot_data.real)
+                col += 1
+
+                labels.append(f"# column {col}: Im(h_{{l={ell},m={em}}}) * R_ext")
+                strain_cols.append(mode_data.imag)
+                ddot_cols.append(ddot_data.imag)
+                col += 1
+
+            arrays_to_txt(labels, strain_cols, strain_filename, OUTPUT_DIR)
+            arrays_to_txt(labels, ddot_cols, ddot_filename, OUTPUT_DIR)
+
+    return time_arr, strain_modes
+
+
+def find_file_for_l(ell: int) -> str:
+    """
+    Finds the file path with the corresponding ell value in the given directory.
+
+    :param ell: (int): l mode to search for.
+    :return: Path to the found file.
+    :raises FileNotFoundError: If no file matching the pattern is found.
+    """
+
+    for filename in os.listdir(INPUT_DIR):
+        if FILE_PATTERN.replace("[MODE=L]", f"{ell}") in filename:
+            return os.path.join(INPUT_DIR, filename)
+    raise FileNotFoundError(f"File with mode l={ell} not found.")
+
+
+def get_index_from_modes(ell: int, em: int, ell_min=ELL_MIN) -> int:
+    """
+    Returns the array index for mode data given (ell, em).
+    The index begins with 0 and through m (inner loop) then l (outer loop).
+
+    :param ell: The l Spherical harmonics mode number
+    :param em: The m Spherical harmonics mode number
+    :param ell_min: The minimum ell value used in the array (default is ELL_MIN).
+
+    :return: The mode data array index for (ell, em).
+
+    >>> get_index_from_modes(3, 1, 2)
+    9
+    """
+    return ell**2 + ell + em - ell_min**2
+
+
+def get_modes_from_index(idx: int, ell_min=ELL_MIN) -> Tuple[int, int]:
+    """
+    Returns the (ell, em) mode numbers given the array index.
+
+    :param idx: The mode data array index.
+    :param ell_min: The minimum ell value used in the array (default is ELL_MIN).
+
+    :return: A tuple containing the (ell, em) mode numbers.
+
+    >>> get_modes_from_index(9, 2)
+    (3, 1)
+    """
+    idx += ell_min**2
+    ell = int(np.sqrt(idx))
+    em = idx - ell**2 - ell
+    return ell, em
+
+
+def arrays_to_txt(
+    labels: List[str],
+    collection: List[np.ndarray],
+    filename: str,
+    dir_path: str,
+) -> None:
+    """Writes an array of NumPy arrays to a text file, formatting each row with labels.
+
+    Args:
+        labels: A list of comment lines.
+        collection: A list of NumPy arrays, where each inner array represents a column.
+        filename: The name of the file to write to.
+        dir_path: The path to the directory where the file will be saved.
+
+    Raises:
+        IOError: If there is an error creating the directory or writing to the file.
+    """
+    if WRITE_FILES:
+        try:
+            os.makedirs(dir_path, exist_ok=True)
+            file_path = os.path.join(dir_path, filename)
+
+            with open(file_path, mode="w", encoding="utf-8") as file:
+                file.write("".join([f"{label}\n" for label in labels]))
+                for row in zip(*collection):
+                    file.write(" ".join([f"{item:.15f}" for item in row]) + "\n")
+            print(f"File {filename} saved to {dir_path}")
+        except IOError as e:
+            raise IOError(f"Error saving data to file: {e}") from e
+
+
+def first_time_derivative(
+    time: NDArray[np.float64],
+    data: NDArray[np.float64],
 ) -> NDArray[np.float64]:
     """
     Calculate the time derivative of the input data using a second-order finite difference stencil.
@@ -99,133 +250,112 @@ def compute_first_derivative_in_time(
 
     >>> time = np.array([0, 1, 2, 3, 4], dtype=np.float64)
     >>> data = np.array([0, 1, 4, 9, 16], dtype=np.float64)
-    >>> compute_first_derivative_in_time(time, data)
+    >>> first_time_derivative(time, data)
     array([1., 2., 4., 6., 7.])
     """
-    dt = time[1] - time[0]
-    derivative = np.zeros_like(data)
+
+    delta_t = time[1] - time[0]
+    data_dt = np.zeros_like(data)
+
     # Second-order in the interior:
-    derivative[1:-1] = (data[2:] - data[:-2]) / (2 * dt)
+    data_dt[1:-1] = (data[2:] - data[:-2]) / (2 * delta_t)
+
     # Drop to first-order at the endpoints
-    derivative[0] = (data[1] - data[0]) / dt
-    derivative[-1] = (data[-1] - data[-2]) / dt
+    data_dt[0] = (data[1] - data[0]) / delta_t
+    data_dt[-1] = (data[-1] - data[-2]) / delta_t
 
-    return derivative
+    return data_dt
 
 
-def compute_second_derivative_in_time(
+def second_time_derivative(
     time: NDArray[np.float64], data: NDArray[np.float64]
 ) -> NDArray[np.float64]:
     """
-    Compute the second time derivative of the input data using the second-order finite difference method,
-    with upwind/downwind stencils for the endpoints.
+    Compute the second time derivative of the input data using the second-order
+    finite difference method, with upwind/downwind stencils for the endpoints.
 
     :param time: A numpy array containing time values.
-    :param data: A numpy array containing data for which the second time derivative is to be calculated.
-    :return: A numpy array containing the second time derivative of the input data.
+    :param data: A numpy array containing corresponding function values to take derivatives of.
+    :return: A numpy array containing the second time derivative of the function data.
 
     >>> time = np.array([0, 1, 2, 3, 4], dtype=np.float64)
     >>> data = np.array([0, 1, 4, 9, 16], dtype=np.float64)
-    >>> compute_second_derivative_in_time(time, data)
+    >>> second_time_derivative(time, data)
     array([2., 2., 2., 2., 2.])
     """
-    dt = time[1] - time[0]
-    n = len(data)
-    second_derivative = np.zeros(n)
+    delta_t = time[1] - time[0]
+    data_dtdt = np.zeros_like(data)
 
     # Interior points using central finite difference
-    second_derivative[1:-1] = (data[:-2] - 2 * data[1:-1] + data[2:]) / (dt**2)
+    central = data[:-2] - 2 * data[1:-1] + data[2:]
+    data_dtdt[1:-1] = central / delta_t**2
 
     # Endpoint 0: forward finite difference (downwind)
-    second_derivative[0] = (2 * data[0] - 5 * data[1] + 4 * data[2] - data[3]) / (
-        dt**2
-    )
+    forward = 2 * data[0] - 5 * data[1] + 4 * data[2] - data[3]
+    data_dtdt[0] = forward / delta_t**2
 
     # Endpoint n-1: backward finite difference (upwind)
-    second_derivative[-1] = (2 * data[-1] - 5 * data[-2] + 4 * data[-3] - data[-4]) / (
-        dt**2
-    )
+    backward = 2 * data[-1] - 5 * data[-2] + 4 * data[-3] - data[-4]
+    data_dtdt[-1] = backward / delta_t**2
 
-    return second_derivative
+    return data_dtdt
 
 
-def compute_psi4_wave_phase_and_amplitude(
-    time: NDArray[np.float64], real: NDArray[np.float64], imag: NDArray[np.float64]
+def psi4_phase_and_amplitude(
+    time: NDArray[np.float64], cmplx: NDArray[np.complex128]
 ) -> Tuple[
     NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]
 ]:
     """
-    Calculates the cumulative phase and amplitude of a gravitational wave signal.
+    Calculates the amplitude and cumulative phase of a gravitational wave signal.
 
     :param time: A numpy array containing time values.
-    :param real: A numpy array containing the real part of the signal.
-    :param imag: A numpy array containing the imaginary part of the signal.
-
-    :return: A tuple containing four numpy arrays (time, cumulative_phase, amplitude, cumulative_phase_derivative).
-
+    :param cmplx: A numpy array containing the a complex signal.
+    :return: A tuple containing four numpy arrays:
+        (time, amplitude, cumulative_phase, cumulative_phase_derivative).
     :raises ValueError: If the lengths of time, real, and imag arrays are not equal.
     """
+    if len(time) != len(cmplx):
+        raise ValueError(
+            f"Time {len(time)} and data {len(cmplx)} array lengths must be equal."
+        )
 
-    if not len(time) == len(real) == len(imag):
-        raise ValueError("The lengths of time, real, and imag arrays must be equal.")
-
-    # Calculate the amplitude of the gravitational wave signal.
-    amplitude = np.sqrt(real**2 + imag**2)
-
-    # Calculate the instantaneous phase of the gravitational wave signal.
-    phase = np.arctan2(imag, real)
-
-    # Initialize a variable to count the number of full cycles completed by the signal.
+    amplitudes = np.abs(cmplx)
+    phases = np.angle(cmplx)
     cycles = 0
+    cum_phase = np.zeros_like(time)
+    last_phase = phases[0]
 
-    # Initialize an empty list to store the cumulative phase of the signal.
-    cum_phase = np.empty_like(time)  # Initialize cum_phase as a numpy array
-
-    # Set the variable `last_phase` to the first value of the instantaneous phase array.
-    last_phase = phase[0]
-
-    # Iterate over each value of the instantaneous phase array.
-    for i, ph in enumerate(phase):
-        # Check if the absolute difference between the current phase and the previous phase
-        # is greater than or equal to pi (to identify phase wrapping).
+    for i, ph in enumerate(phases):
+        # identify phase wrapping
         if np.abs(ph - last_phase) >= np.pi:
-            # Adjust the `cycles` variable based on the direction of phase wrapping.
             cycles += -1 if ph > 0 else 1
-
-        # Calculate the cumulative phase for the current time step and append it to the `cum_phase` list.
         cum_phase[i] = ph + 2 * np.pi * cycles
-
-        # Update the `last_phase` variable with the current phase value.
         last_phase = ph
 
-    # Convert the cumulative phase list to a numpy array.
-    cum_phase = np.array(cum_phase)
-
-    # Compute the time derivative of the cumulative phase using a second-order finite difference stencil.
-    cum_phase_derivative = compute_first_derivative_in_time(time, cum_phase)
-
-    return time, cum_phase, amplitude, cum_phase_derivative
+    cum_phase_dt = first_time_derivative(time, cum_phase)
+    return time, amplitudes, cum_phase, cum_phase_dt
 
 
-def fit_quadratic_to_omega_and_find_minimum(
-    r_over_M: float, time: NDArray[np.float64], omega: NDArray[np.float64]
-) -> float:
+def quad_fit_intercept(time: NDArray[np.float64], data: NDArray[np.float64]) -> float:
     """
-    Fits a quadratic curve to the filtered omega data within a specified time range and outputs the minimum omega value.
+    Samples data from a time interval, applies a quadratic fit, and outputs the |y-intercept|.
+    This function is intended for l=m=2 angular frequency data.
 
+    :param interval_start: A float specifying the begining of the sample interval.
     :param time: A numpy array containing time values.
-    :param omega: A numpy array containing omega values corresponding to the time values.
-
-    :return: The absolute value of the quadratic curve evaluated at t=0.
-
-    :raises ValueError: If the lengths of time and omega arrays are not equal.
+    :param data: A numpy array containing data values corresponding to the time values.
+    :return: The float absolute value of the quadratic curve evaluated at t=0.
+    :raises ValueError: If the lengths of time and data arrays are not equal.
     """
-    if len(time) != len(omega):
-        raise ValueError("The lengths of time and omega arrays must be equal.")
+    if len(time) != len(data):
+        raise ValueError(
+            f"Time {len(time)} and data {len(data)} array lengths must be equal."
+        )
 
     def quadratic(x: float, a: float, b: float, c: float) -> float:
         """
-        Represents a quadratic function.
+        Evaluates a quadratic (ax^2 + bx + c)
 
         :param x: The independent variable.
         :param a: The coefficient of the x^2 term.
@@ -236,223 +366,52 @@ def fit_quadratic_to_omega_and_find_minimum(
         """
         return a * x**2 + b * x + c
 
-    # Filter the data for t=r_over_M to t=r_over_M+200
-    fit_start = r_over_M
-    fit_end = r_over_M + 200.0
-    time_filtered = time[(time >= fit_start) & (time <= fit_end)]
-    omega_filtered = omega[(time >= fit_start) & (time <= fit_end)]
+    # Re-index, keeping only the intersection between numpy arrays
+    time_filtered = time[(EXT_RAD <= time) & (time <= EXT_RAD + INTERVAL)]
+    data_filtered = data[(EXT_RAD <= time) & (time <= EXT_RAD + INTERVAL)]
 
-    # Fit a quadratic curve to the Omega data using nonlinear least squares
-    params, _ = curve_fit(quadratic, time_filtered, omega_filtered)
+    # Fit a quadratic curve to the data using nonlinear least squares
+    params, *_ = curve_fit(quadratic, time_filtered, data_filtered)
 
     # Find the extremum value of the quadratic curve
     a, b, c = params
     extremum_x = -b / (2 * a)
-    omega_min_quad_fit = np.fabs(quadratic(extremum_x, a, b, c))
-    omega_at_t_zero = np.fabs(quadratic(0.0, a, b, c))
-
-    print(
-        f"The extremum of the quadratic curve occurs at t = {extremum_x:.15f} "
-        f"with omega = {omega_min_quad_fit:.15f}. Implied omega(t=0) = {omega_at_t_zero:.15f}"
-    )
-
-    return float(omega_at_t_zero)  # Explicitly cast to float
+    quad_fit_extremum = float(quadratic(extremum_x, a, b, c))
+    if STATUS_MESSAGES:
+        print(
+            f"Quadratic Vertex at (time = {extremum_x:.7e}, value = {quad_fit_extremum:.7e}).\n"
+            f"Params: a = {a:.7e}, b = {b:.7e}, c = {c:.7e}, Intercept magnitude: {np.fabs(c):.7e}"
+        )
+    return np.fabs(c)
 
 
-def perform_complex_fft(
-    time: NDArray[np.float64], real: NDArray[np.float64], imag: NDArray[np.float64]
-) -> Tuple[NDArray[np.float64], NDArray[np.complex128]]:
-    """
-    Performs a complex Fast Fourier Transform (FFT) on the input time, real, and imaginary data.
-
-    :param time: A numpy array containing time values.
-    :param real: A numpy array containing the real part of the signal.
-    :param imag: A numpy array containing the imaginary part of the signal.
-
-    :return: A tuple containing two numpy arrays (frequencies, fft_data).
-
-    :raises ValueError: If the lengths of time, real, and imag arrays are not equal.
-    """
-
-    if not len(time) == len(real) == len(imag):
-        raise ValueError("The lengths of time, real, and imag arrays must be equal.")
-
-    # Combine the real and imaginary data into a single complex signal
-    complex_signal = real + 1j * imag
-
-    # Perform the complex FFT
-    fft_data = np.fft.fft(complex_signal)
-
-    # Calculate the frequency values
-    dt = time[1] - time[0]
-    n = len(time)
-    frequencies = np.fft.fftfreq(n, d=dt)
-
-    return frequencies, fft_data
-
-
-def extract_min_omega_ell2_m2(
-    extraction_radius: float,
-    time_arr: NDArray[np.float64],
-    mode_data: Dict[Tuple[int, int], Tuple[NDArray[np.float64], NDArray[np.float64]]],
+def extract_min_omega_ell2_em2(
+    time: NDArray[np.float64], data_m2_l2: NDArray[np.complex128]
 ) -> float:
     """
     Extracts and saves the phase, amplitude, and omega data for l=m=2 mode from psi4 wave.
     Also fits a quadratic to omega and finds its minimum.
 
-    :param extraction_radius: The extraction radius.
     :param time_arr: Array of time data.
     :param mode_data: Dictionary containing the mode data.
-    :return: A tuple with parameters from the fit quadratic to omega (minimum value, vertex, curvature).
+    :return: float magnitude of the minimum wave frequency of the data
     """
-    real_ell2_m2, imag_ell2_m2 = mode_data[(2, 2)]
 
-    (
-        time_arr,
-        cumulative_phase_ell2_m2,
-        amplitude_ell2_m2,
-        omega_ell2_m2,
-    ) = compute_psi4_wave_phase_and_amplitude(time_arr, real_ell2_m2, imag_ell2_m2)
-
-    phase_amp_omega_file = (
-        f"Rpsi4_r{extraction_radius:06.1f}_ell2_m2_phase_amp_omega.txt"
-    )
-
-    with open(phase_amp_omega_file, mode="w", encoding="utf-8") as file:
-        file.write("# Time    cumulative_phase    amplitude    omega\n")
-        for t, cp, a, o in zip(
-            time_arr, cumulative_phase_ell2_m2, amplitude_ell2_m2, omega_ell2_m2
-        ):
-            file.write(f"{t:.15f} {cp:.15f} {a:.15f} {o:.15f}\n")
-
-    print(
-        f"phase, amplitude, omega data for l=m=2 have been saved to {phase_amp_omega_file}"
-    )
-
-    return fit_quadratic_to_omega_and_find_minimum(
-        extraction_radius, time_arr, omega_ell2_m2
-    )
-
-
-def main() -> None:
-    """
-    Main function that reads the gravitational wave data file and the dimensionless
-    radius r/M, processes the data, and saves the output to a file. The input filename
-    and r/M value are provided via the command line.
-    """
-    if len(sys.argv) != 2:
-        raise RuntimeError(
-            "Usage: python3 BHaH_psi4_to_phase_amp_omega_FFI_strain_psi4check.py <extraction radius (r/M)>"
-        )
-    extraction_radius = float(sys.argv[1])
-    generic_file_name = construct_generic_filename(extraction_radius)
-
-    time_arr, mode_data = read_BHaH_psi4_files(generic_file_name)
-
-    min_omega_ell2_m2 = extract_min_omega_ell2_m2(
-        extraction_radius, time_arr, mode_data
-    )
-
-    # Next loop over modes and perform an FFT:
-    strain_data: Dict[
-        Tuple[int, int], Tuple[NDArray[np.float64], NDArray[np.float64]]
-    ] = {}
-
-    ddot_strain_data: Dict[
-        Tuple[int, int], Tuple[NDArray[np.float64], NDArray[np.float64]]
-    ] = {}  # Second time derivative of strain data
-
-    for ell in range(2, 9):
-        for m in range(-ell, ell + 1):
-            # min_omega_m = np.fabs(m) * min_omega_ell2_m2 / 2.0
-            min_omega = min_omega_ell2_m2  # The angular frequency of the l=m=2 mode at t=0 should be the minimum physical omega other than GW memory.
-
-            real_ell_m, imag_ell_m = mode_data[(ell, m)]
-
-            # Perform the FFT
-            fft_result = np.fft.fft(real_ell_m + 1j * imag_ell_m)
-
-            # Calculate angular frequencies
-            omega_list = (
-                np.fft.fftfreq(len(time_arr), time_arr[1] - time_arr[0]) * 2 * np.pi
-            )
-
-            # Just below Eq. 27 in https://arxiv.org/abs/1006.1632
-            for i, omega in enumerate(omega_list):
-                if np.fabs(omega) <= min_omega:
-                    fft_result[i] *= 1 / (1j * min_omega) ** 2
-                else:
-                    fft_result[i] *= 1 / (1j * np.fabs(omega)) ** 2
-
-            # Now perform the inverse FFT
-            second_integral_complex = np.fft.ifft(fft_result)
-
-            # Separate the real and imaginary parts of the second time integral
-            second_integral_real = np.real(second_integral_complex)
-            second_integral_imag = np.imag(second_integral_complex)
-
-            strain_data[(ell, m)] = (second_integral_real, second_integral_imag)
-
-            # Calculate the second time derivative of second_integral_real and second_integral_imag
-            second_derivative_real = compute_second_derivative_in_time(
-                time_arr, second_integral_real
-            )
-            second_derivative_imag = compute_second_derivative_in_time(
-                time_arr, second_integral_imag
-            )
-            ddot_strain_data[(ell, m)] = (
-                second_derivative_real,
-                second_derivative_imag,
-            )
-
-    for ell in range(2, 9):
-        # Save the strain output to a file with _conv_to_strain.txt extension
-        strain_file = f"Rpsi4_r{extraction_radius:06.1f}_l{ell}_conv_to_strain.txt"
-        with open(strain_file, mode="w", encoding="utf-8") as file:
-            column = 1
-            file.write(f"# column {column}: t-R_ext = [retarded time]\n")
-            column += 1
-            for m in range(-ell, ell + 1):
-                file.write(f"# column {column}: Re(h_{{l={ell},m={m}}}) * R_ext\n")
-                column += 1
-                file.write(f"# column {column}: Im(h_{{l={ell},m={m}}}) * R_ext\n")
-                column += 1
-            for i, time in enumerate(time_arr):
-                out_str = str(time)
-                for m in range(-ell, ell + 1):
-                    out_str += (
-                        f" {strain_data[(ell,m)][0][i]} {strain_data[ell,m][1][i]}"
-                    )
-                file.write(out_str + "\n")
-        print(f"Strain data have been saved to {strain_file}")
-
-        # Save the strain->psi4 output to a file with _from_strain.txt extension
-        ddot_file = f"Rpsi4_r{extraction_radius:06.1f}_l{ell}_from_strain.txt"
-        with open(ddot_file, mode="w", encoding="utf-8") as file:
-            column = 1
-            file.write(f"# column {column}: t-R_ext = [retarded time]\n")
-            column += 1
-            for m in range(-ell, ell + 1):
-                file.write(f"# column {column}: Re(Psi4_{{l={ell},m={m}}}) * R_ext\n")
-                column += 1
-                file.write(f"# column {column}: Im(Psi4_{{l={ell},m={m}}}) * R_ext\n")
-                column += 1
-            for i, time in enumerate(time_arr):
-                out_str = str(time)
-                for m in range(-ell, ell + 1):
-                    out_str += f" {ddot_strain_data[(ell,m)][0][i]} {ddot_strain_data[ell,m][1][i]}"
-                file.write(out_str + "\n")
-
-        # with open("check.txt", mode="w", encoding="utf-8") as file:
-        #     file.write("# Time    Second_Integral_Real    Second_Integral_Imag\n")
-        #     for t, real, imag in zip(
-        #         time_arr, second_derivative_real, second_derivative_imag
-        #     ):
-        #         file.write(f"{t:.15f} {real:.15f} {imag:.15f}\n")
+    collection = psi4_phase_and_amplitude(time, data_m2_l2)
+    angular_frequency = collection[3]
+    if OUTPUT_DIR != "":
+        labels = [
+            "# Col 0: Time",
+            "# Col 1: Amplitude",
+            "# Col 2: Cumulative_Phase",
+            "# Col 3: Angular Frequency",
+        ]
+        filename = f"Rpsi4_r{EXT_RAD:06.1f}_ell2_m2_phase_amp_omega.txt"
+        arrays_to_txt(labels, collection, filename, OUTPUT_DIR)
+    return quad_fit_intercept(time, angular_frequency)
 
 
 if __name__ == "__main__":
-    # First run doctests
     import doctest
 
     results = doctest.testmod()
@@ -461,7 +420,7 @@ if __name__ == "__main__":
         print(f"Doctest failed: {results.failed} of {results.attempted} test(s)")
         sys.exit(1)
     else:
-        print(f"Doctest passed: All {results.attempted} test(s) passed")
+        if STATUS_MESSAGES:
+            print(f"Doctest passed: All {results.attempted} test(s) passed")
 
-    # Then run the main() function.
-    main()
+    psi4_ffi_to_strain()
