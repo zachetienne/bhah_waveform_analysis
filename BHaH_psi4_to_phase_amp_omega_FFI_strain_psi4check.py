@@ -10,6 +10,7 @@ It's designed to work with ASCII files containing gravitational wave data from s
 Author: Zachariah B. Etienne
         zachetie **at** gmail **dot* com
 """
+
 import sys
 from typing import Tuple, Dict
 
@@ -137,9 +138,7 @@ def compute_second_derivative_in_time(
     second_derivative[1:-1] = (data[:-2] - 2 * data[1:-1] + data[2:]) / (dt**2)
 
     # Endpoint 0: forward finite difference (downwind)
-    second_derivative[0] = (2 * data[0] - 5 * data[1] + 4 * data[2] - data[3]) / (
-        dt**2
-    )
+    second_derivative[0] = (2 * data[0] - 5 * data[1] + 4 * data[2] - data[3]) / (dt**2)
 
     # Endpoint n-1: backward finite difference (upwind)
     second_derivative[-1] = (2 * data[-1] - 5 * data[-2] + 4 * data[-3] - data[-4]) / (
@@ -341,7 +340,9 @@ def main() -> None:
     and r/M value are provided via the command line.
     """
     if len(sys.argv) != 2:
-        print("Usage: python3 BHaH_psi4_to_phase_amp_omega_FFI_strain_psi4check.py <extraction radius (r/M)>")
+        print(
+            "Usage: python3 BHaH_psi4_to_phase_amp_omega_FFI_strain_psi4check.py <extraction radius (r/M)>"
+        )
         sys.exit()
     extraction_radius = float(sys.argv[1])
     generic_file_name = construct_generic_filename(extraction_radius)
