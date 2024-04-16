@@ -1,0 +1,15 @@
+appdirs
+black==24.2.0
+clang-format==18.1.1
+darglint
+ipython
+multiprocess
+mypy==1.9.0
+nrpypn
+nrpylatex
+py-cpuinfo
+pydocstyle
+pylint
+setuptools
+sympy
+typing-extensions

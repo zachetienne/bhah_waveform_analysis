@@ -1,0 +1,111 @@
+name: Python CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  # Run on the 1st and 15th of each month, at 4:47AM UTC, to check for breakages due to e.g., sympy-dev.
+  schedule:
+    - cron: '47 4 1,15 * *'
+
+jobs:
+  static-analysis:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+       os: ['ubuntu-20.04', 'ubuntu-22.04']
+       python-version: ['3.6.7', '3.7.13', '3.8.18', '3.9.19', '3.x']
+       exclude:
+         - os: 'ubuntu-22.04'
+           python-version: '3.6.7'
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Display Python version
+      run: python --version
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -U -r requirements.txt
+        if [[ "${{ matrix.python-version }}" != "3.6.7" && "${{ matrix.python-version }}" != "3.7.13" ]]; then
+          pip install -U -r requirements-dev.txt
+        else
+          # Install packages from requirements-dev.txt except those with a fixed version.
+          cat requirements-dev.txt | grep -v '==' | xargs pip install -U
+        fi
+        pip install -U clang-format ipython setuptools
+        sudo apt-get -y install libgsl-dev
+
+    - name: Install sympy or DEVELOPMENT sympy based on Python version
+      run: |
+        if [[ "${{ matrix.python-version }}" != "3.6.7" && "${{ matrix.python-version }}" != "3.7.13" ]]; then
+          pip install git+https://github.com/sympy/sympy.git
+        else
+          pip install sympy
+        fi
+
+    - name: Display sympy and clang-format versions
+      run: |
+        echo "Running CI tests with SymPy version = $(isympy --version)"
+        echo "Running CI tests with clang-format version = $(clang-format --version)"
+
+    - name: Check mypy and black versions when Python != 3.6.7 and != 3.7.13 chosen (they are too broken in those Python versions).
+      if: matrix.python-version != '3.6.7' && matrix.python-version != '3.7.13'
+      run: |
+        mypy --version
+        black --version
+
+    - name: Run doctests, black, mypy, pylint, pydocstyle, and darglint on each file.
+      run: |
+        failed_tests=()
+        # Use find to locate python files based on pattern or directory structure.
+        #   Don't analyze Python scripts in tests/ (though they should pass!)
+        python_files=$(find . -name '*.py' -not -name '__init__.py')
+
+        for python_file in $python_files; do
+          echo ""
+          echo "-={ $python_file }=-"
+          echo "-={ Step 1: Doctests/run Python module }=-"
+          DOCTEST_MODE=1 PYTHONPATH=.:$PYTHONPATH python $python_file || { failed_tests+=("doctest in $python_file"); break; }
+          # Turns out that black in Python 3.6 & 3.7 has a heart attack when parsing equations/general_relativity/BSSN_quantities.py:
+          # INTERNAL ERROR: Black produced code that is not equivalent to the source. Please report a bug on ....
+          if [[ "${{ matrix.python-version }}" != "3.6.7" && "${{ matrix.python-version }}" != "3.7.13" && "${{ matrix.python-version }}" != "3.8.18" ]]; then
+            echo "-={ Step 2: black $python_file }=-"
+            black --check $python_file || { failed_tests+=("black in $python_file"); break; }
+            echo "-={ Step 3: mypy }=-"
+            PYTHONPATH=.:$PYTHONPATH mypy --strict --pretty --allow-untyped-calls $python_file || { failed_tests+=("mypy in $python_file"); break; }
+          fi
+          echo "-={ Step 4: pylint }=-"
+          pylint_score="0"
+          if [[ "${{ matrix.python-version }}" == "3.6.7" || "${{ matrix.python-version }}" == "3.7.13" ]]; then
+            pylint_score=$(PYTHONPATH=.:$PYTHONPATH pylint --rcfile=.pylintrc_python36 $python_file | tail -2 | grep -Eo '[0-9\.]+' | head -1 || echo "0")
+          else
+            pylint_score=$(PYTHONPATH=.:$PYTHONPATH pylint --rcfile=.pylintrc $python_file | tail -2 | grep -Eo '[0-9\.]+' | head -1 || echo "0")
+          fi
+          echo "Pylint score is $pylint_score"
+          if (( $(echo "$pylint_score < 9.5" | bc -l) )); then
+            PYTHONPATH=.:$PYTHONPATH pylint --rcfile=.pylintrc $python_file || true
+            echo "Pylint score is below 9.5, failing..."
+            failed_tests+=("pylint in $python_file")
+            break
+          fi
+          PYTHONPATH=.:$PYTHONPATH pylint --rcfile=.pylintrc $python_file || true
+          echo "-={ Step 5: pydocstyle }=-"
+          pydocstyle $python_file || { failed_tests+=("pydocstyle in $python_file"); break; }
+          echo "-={ Step 6: darglint }=-"
+          darglint -v 2 $python_file || { failed_tests+=("darglint in $python_file"); break; }
+        done
+
+        if [ ${#failed_tests[@]} -ne 0 ]; then
+          echo "The following tests failed: ${failed_tests[*]}"
+          exit 1
+        fi
