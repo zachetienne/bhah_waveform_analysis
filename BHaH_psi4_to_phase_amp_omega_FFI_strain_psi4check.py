@@ -1,5 +1,6 @@
 """
-This module processes gravitational wave data from numerical relativity simulations.
+Process gravitational wave data from numerical relativity simulations.
+
 It provides functions to read waveform data files, compute derivatives, process wave data,
 perform complex Fast Fourier Transforms (FFT), and fit data to a quadratic function.
 The main functionality involves reading gravitational wave data, extracting relevant
@@ -118,8 +119,7 @@ def compute_second_derivative_in_time(
     time: NDArray[np.float64], data: NDArray[np.float64]
 ) -> NDArray[np.float64]:
     """
-    Compute the second time derivative of the input data using the second-order finite difference method,
-    with upwind/downwind stencils for the endpoints.
+    Compute the second time derivative of the input data using the second-order finite difference method, with upwind/downwind stencils for the endpoints.
 
     :param time: A numpy array containing time values.
     :param data: A numpy array containing data for which the second time derivative is to be calculated.
@@ -154,7 +154,7 @@ def compute_psi4_wave_phase_and_amplitude(
     NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]
 ]:
     """
-    Calculates the cumulative phase and amplitude of a gravitational wave signal.
+    Calculate the cumulative phase and amplitude of a gravitational wave signal.
 
     :param time: A numpy array containing time values.
     :param real: A numpy array containing the real part of the signal.
@@ -164,7 +164,6 @@ def compute_psi4_wave_phase_and_amplitude(
 
     :raises ValueError: If the lengths of time, real, and imag arrays are not equal.
     """
-
     if not len(time) == len(real) == len(imag):
         raise ValueError("The lengths of time, real, and imag arrays must be equal.")
 
@@ -212,6 +211,7 @@ def fit_quadratic_to_omega_and_find_minimum(
     """
     Fits a quadratic curve to the filtered omega data within a specified time range and outputs the minimum omega value.
 
+    :param r_over_M: Dimensionless extraction radius r/M.
     :param time: A numpy array containing time values.
     :param omega: A numpy array containing omega values corresponding to the time values.
 
@@ -224,7 +224,7 @@ def fit_quadratic_to_omega_and_find_minimum(
 
     def quadratic(x: float, a: float, b: float, c: float) -> float:
         """
-        Represents a quadratic function.
+        Represent a quadratic function.
 
         :param x: The independent variable.
         :param a: The coefficient of the x^2 term.
@@ -262,7 +262,7 @@ def perform_complex_fft(
     time: NDArray[np.float64], real: NDArray[np.float64], imag: NDArray[np.float64]
 ) -> Tuple[NDArray[np.float64], NDArray[np.complex128]]:
     """
-    Performs a complex Fast Fourier Transform (FFT) on the input time, real, and imaginary data.
+    Perform a complex Fast Fourier Transform (FFT) on the input time, real, and imaginary data.
 
     :param time: A numpy array containing time values.
     :param real: A numpy array containing the real part of the signal.
@@ -272,7 +272,6 @@ def perform_complex_fft(
 
     :raises ValueError: If the lengths of time, real, and imag arrays are not equal.
     """
-
     if not len(time) == len(real) == len(imag):
         raise ValueError("The lengths of time, real, and imag arrays must be equal.")
 
@@ -296,7 +295,7 @@ def extract_min_omega_ell2_m2(
     mode_data: Dict[Tuple[int, int], Tuple[NDArray[np.float64], NDArray[np.float64]]],
 ) -> float:
     """
-    Extracts and saves the phase, amplitude, and omega data for l=m=2 mode from psi4 wave.
+    Extract the phase, amplitude, and omega data for l=m=2 mode from psi4 wave.
     Also fits a quadratic to omega and finds its minimum.
 
     :param extraction_radius: The extraction radius.
@@ -334,11 +333,7 @@ def extract_min_omega_ell2_m2(
 
 
 def main() -> None:
-    """
-    Main function that reads the gravitational wave data file and the dimensionless
-    radius r/M, processes the data, and saves the output to a file. The input filename
-    and r/M value are provided via the command line.
-    """
+    """Read the gravitational wave data file and the dimensionless radius r/M, processes the data, and saves the output to a file. The input filename and r/M value are provided via the command line."""
     if len(sys.argv) != 2:
         print(
             "Usage: python3 BHaH_psi4_to_phase_amp_omega_FFI_strain_psi4check.py <extraction radius (r/M)>"
