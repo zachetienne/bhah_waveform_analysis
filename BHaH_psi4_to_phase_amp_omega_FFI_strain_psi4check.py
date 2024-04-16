@@ -341,9 +341,8 @@ def main() -> None:
     and r/M value are provided via the command line.
     """
     if len(sys.argv) != 2:
-        raise RuntimeError(
-            "Usage: python3 BHaH_psi4_to_phase_amp_omega_FFI_strain_psi4check.py <extraction radius (r/M)>"
-        )
+        print("Usage: python3 BHaH_psi4_to_phase_amp_omega_FFI_strain_psi4check.py <extraction radius (r/M)>")
+        sys.exit()
     extraction_radius = float(sys.argv[1])
     generic_file_name = construct_generic_filename(extraction_radius)
 
