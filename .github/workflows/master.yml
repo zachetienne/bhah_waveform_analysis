@@ -2,9 +2,9 @@ name: Python CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ master ]
   pull_request:
-    branches: [ main ]
+    branches: [ master ]
   # Run on the 1st and 15th of each month, at 4:47AM UTC, to check for breakages due to e.g., sympy-dev.
   schedule:
     - cron: '47 4 1,15 * *'
