@@ -1,12 +1,15 @@
 """
 This module processes gravitational wave data from numerical relativity simulations.
 
-The module reads a directory of ASCII files of various ell values of waveform data, computes phase and amplitude data,
-calculates a minimum data frequency using a quadratic fit of the monotonic phase of  ell2 m2 data,
-and uses a Fast Fourier Transform to compute the second time integral of the waveform, (the strain).
+The module reads a directory of ASCII files of various ell values of waveform data,
+computes phase and amplitude data, calculates a minimum data frequency using a
+quadratic fit of the monotonic phase of  ell2 m2 data, and uses a Fast Fourier Transform
+to compute the second time integral of the waveform, (the strain).
 The module computes a second derivative of the result to check against the original data.
 
-The phase and amplitude, the second integral, and the twice integrated-twice differentiated data is saved to txt files.
+The phase and amplitude, the second integral, and the twice integrated-twice differentiated
+data is saved to txt files.
+
 The primary function returns the second integral data as a numpy array with the various ell-values.
 
 Author: Zachariah B. Etienne
@@ -15,51 +18,42 @@ Author: Zachariah B. Etienne
 
 import sys
 import os
-from typing import List, Tuple
+from typing import Union, List, Tuple
 import numpy as np
 from numpy.typing import NDArray
 from scipy.optimize import curve_fit
 
-
-INPUT_DIR = "../BH_VIS/data/r100" # changeable in animation_main.py
-OUTPUT_DIR = "../BH_VIS/data/r100_strain"
-FILE_PATTERN = "_l[MODE=L]-"
-ELL_MIN = 2
-ELL_MAX = 8
-EXT_RAD = 100 # changeable in animation_main.py
-INTERVAL = 200
-CUTTOFF_FACTOR = 0.75
-STATUS_MESSAGES = True
-WRITE_FILES = True # changeable in animation_main.py
+# if data file naming conventions change then
+# adjust the find_file_for_l pattern for inputs
+# and the psi4_ffi_to_strain for outputs
 
 
-def read_psi4_dir() -> tuple[np.ndarray, np.ndarray]:
+def read_psi4_dir(
+    data_dir: str, ell_max: int, ell_min: int = 2
+) -> tuple[NDArray[np.float64], NDArray[np.complex128]]:
     """
-    Reads data from psi4 output directory and returns time and mode data.
+    Read data from psi4 output directory and return time and mode data.
 
     :return: tuple[np.ndarray, np.ndarray]
         - time_data: Array of numpy.float64 time values (shape: (n_times,) ).
         - mode_data: 2D Array for modes of numpy.complex128 data (shape: (2*l+1, n_times,) ).
     """
+    time_data: NDArray[np.float64]
+    psi4_modes_data: list[NDArray[np.complex128]] = []
 
-    time_data: list[np.ndarray] = []
-    psi4_modes_data: list[np.ndarray] = []
     n_times = -1
-
-    for ell in range(ELL_MIN, ELL_MAX + 1):
-        filepath = find_file_for_l(ell)
+    for ell in range(ell_min, ell_max + 1):
+        filepath = find_file_for_l(data_dir, ell)
         with open(filepath, "r", encoding="utf-8") as file:
             lines = [line for line in file.readlines() if not line.startswith("#")]
         data = np.array([np.array(line.split(), dtype=np.float64) for line in lines])
 
-        time_data, index = np.unique(
-            data[:, 0], return_index=True
-        )  # sorts by time, removing duplicates
-        data = data[index]  # sorts data accordningly
+        # np.unique sorts by time, removing duplicates
+        time_data, indicies = np.unique(data[:, 0], return_index=True)
+        data = data[indicies]  # sort data accordningly
 
         if n_times == -1:
             n_times = len(time_data)
-
         if n_times != len(time_data):
             raise ValueError(
                 f"Inconsistent times for l={ell}. Expected {n_times}, got {len(time_data)}."
@@ -72,28 +66,48 @@ def read_psi4_dir() -> tuple[np.ndarray, np.ndarray]:
     return np.array(time_data), np.array(psi4_modes_data)
 
 
-def psi4_ffi_to_strain():
+def psi4_ffi_to_strain(
+    data_dir: str,  # changeable in animation_main.py
+    output_dir: str,
+    ell_max: int = 8,
+    ext_rad: float = 100.0,  # changeable in animation_main.py
+    interval: float = 200.0,
+    cutoff_factor: float = 0.75,
+    # 0 < cutoff_factor <= 1. Lower values risk nonphysical noise, higher may filter physical data.
+) -> Tuple[NDArray[np.float64], NDArray[np.complex128]]:
     """
-    Calculates the strain modes from PSI4 data using FFI.
+    Calculate the strain modes from PSI4 data using FFI.
 
-    Returns:
-        A numpy array of numpy arrays representing the strain modes.
+    Reads each of the ell-modes stored at `data_dir` from 2 to `ell_max` inclusive.
+    Uses the ell2em2 mode to extrapolate a minimum frequency, and scales by a cutoff.
+    Uses FFT and then divides by a set of frequencies to integrate the psi4 data.
+    Stores the resulting strain data and its double derivative, and returns the strain data
+    as an array of the various modes, each mode an array of complex data at various timestates.
 
-    Raises:
-        IOError: If there is an error reading the PSI4 data or writing strain data.
-        ValueError: If the lengths of the time and data arrays are not equal.
+    :param data_dir: directory path where raw psi4 ell-mode data is read
+    :param output_dir: directory path to write files to (no output files if empty string)
+    :param ell_max: maximum ell value to read data for
+    :param ext_rad: extraction radius of psi4 data, used as location to sample for minimum frequency
+    :param interval: the size of the sampling interval to extrapolate a minimum frequency
+    :param cutoff_factor: scaling factor on the min frequency, providing a cutoff for integration
+    :return: A numpy array of numpy arrays representing the strain modes.
+    :raises IOError: Rrror reading the PSI4 data or writing strain data.
+    :raises ValueError: Lengths of the time and data arrays are not equal.
     """
+    ell_min = 2  # if not 2, also adjust calls to read_psi4_dir(), modesindex(), and indexmodes()
 
     try:
-        time_arr, psi4_modes_data = read_psi4_dir()
+        time_arr, psi4_modes_data = read_psi4_dir(data_dir, ell_max)
     except IOError as e:
         raise IOError(f"Error reading PSI4 data: {e}") from e
 
-    # Get minimum frequency cutoff from l=m=2 mode
-    min_omega_l2m2 = extract_min_omega_ell2_em2(
-        time_arr, psi4_modes_data[get_index_from_modes(2, 2)]
+    ell2em2_wave = psi4_phase_and_amplitude(
+        time_arr, psi4_modes_data[modes_index(2, 2)]
     )
-    freq_cutoff = CUTTOFF_FACTOR * min_omega_l2m2
+
+    # The estimated minimum wave frequency for ell2_em2, scaled by a factor.
+    min_freq = quad_fit_intercept(time_arr, ell2em2_wave[3], ext_rad, interval)
+    freq_cutoff = min_freq * cutoff_factor
 
     # Initialize arrays for strain modes and their second time derivatives
     strain_modes = np.zeros_like(psi4_modes_data)
@@ -104,10 +118,10 @@ def psi4_ffi_to_strain():
 
     # Next loop over modes and perform an FFT:
     mode_idx = 0
-    for ell in range(ELL_MIN, ELL_MAX + 1):
+    for ell in range(ell_min, ell_max + 1):
         for em in range(-ell, ell + 1):
             # Apply FFT and filter, see Eq. 27 in https://arxiv.org/abs/1006.1632
-            fft_result = np.fft.fft(psi4_modes_data[get_index_from_modes(ell, em)])
+            fft_result = np.fft.fft(psi4_modes_data[modes_index(ell, em)])
             for i, freq in enumerate(freq_list):
                 if np.fabs(freq) <= np.fabs(freq_cutoff):
                     fft_result[i] *= 1 / (1j * freq_cutoff) ** 2
@@ -122,11 +136,20 @@ def psi4_ffi_to_strain():
             )
             mode_idx += 1
 
-    # Save the strain output to a file with _conv_to_strain.txt extension
-    if OUTPUT_DIR != "":
-        for ell in range(ELL_MIN, ELL_MAX + 1):
-            strain_filename = f"Rpsi4_r{EXT_RAD:06.1f}_l{ell}_conv_to_strain.txt"
-            ddot_filename = f"Rpsi4_r{EXT_RAD:06.1f}_l{ell}_from_strain.txt"
+    # Save ell2_em2 psi4 wave data, and all modes strain data.
+    if output_dir != "":
+        labels = [
+            "# Col 0: Time",
+            "# Col 1: Amplitude",
+            "# Col 2: Cumulative_Phase",
+            "# Col 3: Angular Frequency",
+        ]
+        filename = f"Rpsi4_r{ext_rad:06.1f}_ell2_m2_phase_amp_omega.txt"
+        arrays_to_txt(labels, ell2em2_wave, filename, output_dir)
+
+        for ell in range(ell_min, ell_max + 1):
+            strain_filename = f"Rpsi4_r{ext_rad:06.1f}_l{ell}_conv_to_strain.txt"
+            ddot_filename = f"Rpsi4_r{ext_rad:06.1f}_l{ell}_from_strain.txt"
             labels = []
             strain_cols = []
             ddot_cols = []
@@ -137,8 +160,8 @@ def psi4_ffi_to_strain():
             col += 1
 
             for em in range(-ell, ell + 1):
-                mode_data = strain_modes[get_index_from_modes(ell, em)]
-                ddot_data = strain_modes_ddot[get_index_from_modes(ell, em)]
+                mode_data = strain_modes[modes_index(ell, em)]
+                ddot_data = strain_modes_ddot[modes_index(ell, em)]
 
                 labels.append(f"# column {col}: Re(h_{{l={ell},m={em}}}) * R_ext")
                 strain_cols.append(mode_data.real)
@@ -150,54 +173,52 @@ def psi4_ffi_to_strain():
                 ddot_cols.append(ddot_data.imag)
                 col += 1
 
-            arrays_to_txt(labels, strain_cols, strain_filename, OUTPUT_DIR)
-            arrays_to_txt(labels, ddot_cols, ddot_filename, OUTPUT_DIR)
+            arrays_to_txt(labels, strain_cols, strain_filename, output_dir)
+            arrays_to_txt(labels, ddot_cols, ddot_filename, output_dir)
 
     return time_arr, strain_modes
 
 
-def find_file_for_l(ell: int) -> str:
+def find_file_for_l(data_dir: str, ell: int) -> str:
     """
-    Finds the file path with the corresponding ell value in the given directory.
+    Find the file path with the corresponding ell value in the given directory.
 
     :param ell: (int): l mode to search for.
     :return: Path to the found file.
     :raises FileNotFoundError: If no file matching the pattern is found.
     """
-
-    for filename in os.listdir(INPUT_DIR):
-        if FILE_PATTERN.replace("[MODE=L]", f"{ell}") in filename:
-            return os.path.join(INPUT_DIR, filename)
+    for filename in os.listdir(data_dir):
+        if "_l[L]-".replace("[L]", f"{ell}") in filename:
+            return os.path.join(data_dir, filename)
     raise FileNotFoundError(f"File with mode l={ell} not found.")
 
 
-def get_index_from_modes(ell: int, em: int, ell_min=ELL_MIN) -> int:
+def modes_index(ell: int, em: int, ell_min: int = 2) -> int:
     """
-    Returns the array index for mode data given (ell, em).
+    Return the array index for mode data given (ell, em).
+
     The index begins with 0 and through m (inner loop) then l (outer loop).
 
     :param ell: The l Spherical harmonics mode number
     :param em: The m Spherical harmonics mode number
-    :param ell_min: The minimum ell value used in the array (default is ELL_MIN).
-
+    :param ell_min: The minimum ell value used in the array
     :return: The mode data array index for (ell, em).
 
-    >>> get_index_from_modes(3, 1, 2)
+    >>> modes_index(3, 1, 2)
     9
     """
     return ell**2 + ell + em - ell_min**2
 
 
-def get_modes_from_index(idx: int, ell_min=ELL_MIN) -> Tuple[int, int]:
+def index_modes(idx: int, ell_min: int = 2) -> Tuple[int, int]:
     """
-    Returns the (ell, em) mode numbers given the array index.
+    Given the array index, return the (ell, em) mode numbers.
 
     :param idx: The mode data array index.
-    :param ell_min: The minimum ell value used in the array (default is ELL_MIN).
-
+    :param ell_min: The minimum ell value used in the array
     :return: A tuple containing the (ell, em) mode numbers.
 
-    >>> get_modes_from_index(9, 2)
+    >>> index_modes(9, 2)
     (3, 1)
     """
     idx += ell_min**2
@@ -208,33 +229,32 @@ def get_modes_from_index(idx: int, ell_min=ELL_MIN) -> Tuple[int, int]:
 
 def arrays_to_txt(
     labels: List[str],
-    collection: List[np.ndarray],
+    collection: Union[
+        NDArray[np.float64], List[NDArray[np.float64]], Tuple[NDArray[np.float64], ...]
+    ],
     filename: str,
     dir_path: str,
 ) -> None:
-    """Writes an array of NumPy arrays to a text file, formatting each row with labels.
-
-    Args:
-        labels: A list of comment lines.
-        collection: A list of NumPy arrays, where each inner array represents a column.
-        filename: The name of the file to write to.
-        dir_path: The path to the directory where the file will be saved.
-
-    Raises:
-        IOError: If there is an error creating the directory or writing to the file.
     """
-    if WRITE_FILES:
-        try:
-            os.makedirs(dir_path, exist_ok=True)
-            file_path = os.path.join(dir_path, filename)
+    Write an array of NumPy arrays to a text file, formatting each row with labels.
 
-            with open(file_path, mode="w", encoding="utf-8") as file:
-                file.write("".join([f"{label}\n" for label in labels]))
-                for row in zip(*collection):
-                    file.write(" ".join([f"{item:.15f}" for item in row]) + "\n")
-            print(f"File {filename} saved to {dir_path}")
-        except IOError as e:
-            raise IOError(f"Error saving data to file: {e}") from e
+    :param labels: A list of comment lines. Each element in the list represents a comment line.
+    :param collection: An group of NumPy arrays, where each inner array represents a column.
+    :param filename: The name of the file to write to.
+    :param dir_path: The path to the directory where the file will be saved.
+    :raises IOError: If there is an error creating the directory or writing to the file.
+    """
+    try:
+        os.makedirs(dir_path, exist_ok=True)
+        file_path = os.path.join(dir_path, filename)
+
+        with open(file_path, mode="w", encoding="utf-8") as file:
+            file.write("".join([f"{label}\n" for label in labels]))
+            for row in zip(*collection):
+                file.write(" ".join([f"{item:.15f}" for item in row]) + "\n")
+        print(f"File {filename} saved to {dir_path}")
+    except IOError as e:
+        raise IOError(f"Error saving data to file: {e}") from e
 
 
 def first_time_derivative(
@@ -253,7 +273,6 @@ def first_time_derivative(
     >>> first_time_derivative(time, data)
     array([1., 2., 4., 6., 7.])
     """
-
     delta_t = time[1] - time[0]
     data_dt = np.zeros_like(data)
 
@@ -271,8 +290,9 @@ def second_time_derivative(
     time: NDArray[np.float64], data: NDArray[np.float64]
 ) -> NDArray[np.float64]:
     """
-    Compute the second time derivative of the input data using the second-order
-    finite difference method, with upwind/downwind stencils for the endpoints.
+    Compute the second time derivative of the input data.
+    
+    Uses the second-order finite difference method, with upwind/downwind stencils for the endpoints.
 
     :param time: A numpy array containing time values.
     :param data: A numpy array containing corresponding function values to take derivatives of.
@@ -307,7 +327,7 @@ def psi4_phase_and_amplitude(
     NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]
 ]:
     """
-    Calculates the amplitude and cumulative phase of a gravitational wave signal.
+    Calculate the amplitude and cumulative phase of a gravitational wave signal.
 
     :param time: A numpy array containing time values.
     :param cmplx: A numpy array containing the a complex signal.
@@ -337,9 +357,16 @@ def psi4_phase_and_amplitude(
     return time, amplitudes, cum_phase, cum_phase_dt
 
 
-def quad_fit_intercept(time: NDArray[np.float64], data: NDArray[np.float64]) -> float:
+def quad_fit_intercept(
+    time: NDArray[np.float64],
+    data: NDArray[np.float64],
+    ext_rad: float,
+    interval: float,
+    verbose: bool = False,
+) -> float:
     """
-    Samples data from a time interval, applies a quadratic fit, and outputs the |y-intercept|.
+    Sample data from a time interval, apply a quadratic fit, and output the |y-intercept|.
+    
     This function is intended for l=m=2 angular frequency data.
 
     :param interval_start: A float specifying the begining of the sample interval.
@@ -355,7 +382,7 @@ def quad_fit_intercept(time: NDArray[np.float64], data: NDArray[np.float64]) -> 
 
     def quadratic(x: float, a: float, b: float, c: float) -> float:
         """
-        Evaluates a quadratic (ax^2 + bx + c)
+        Evaluate a quadratic polynomial (ax^2 + bx + c).
 
         :param x: The independent variable.
         :param a: The coefficient of the x^2 term.
@@ -367,8 +394,8 @@ def quad_fit_intercept(time: NDArray[np.float64], data: NDArray[np.float64]) -> 
         return a * x**2 + b * x + c
 
     # Re-index, keeping only the intersection between numpy arrays
-    time_filtered = time[(EXT_RAD <= time) & (time <= EXT_RAD + INTERVAL)]
-    data_filtered = data[(EXT_RAD <= time) & (time <= EXT_RAD + INTERVAL)]
+    time_filtered = time[(ext_rad <= time) & (time <= ext_rad + interval)]
+    data_filtered = data[(ext_rad <= time) & (time <= ext_rad + interval)]
 
     # Fit a quadratic curve to the data using nonlinear least squares
     params, *_ = curve_fit(quadratic, time_filtered, data_filtered)
@@ -376,39 +403,13 @@ def quad_fit_intercept(time: NDArray[np.float64], data: NDArray[np.float64]) -> 
     # Find the extremum value of the quadratic curve
     a, b, c = params
     extremum_x = -b / (2 * a)
-    quad_fit_extremum = float(quadratic(extremum_x, a, b, c))
-    if STATUS_MESSAGES:
+    quad_fit_extremum = quadratic(extremum_x, a, b, c)
+    if verbose:
         print(
             f"Quadratic Vertex at (time = {extremum_x:.7e}, value = {quad_fit_extremum:.7e}).\n"
             f"Params: a = {a:.7e}, b = {b:.7e}, c = {c:.7e}, Intercept magnitude: {np.fabs(c):.7e}"
         )
-    return np.fabs(c)
-
-
-def extract_min_omega_ell2_em2(
-    time: NDArray[np.float64], data_m2_l2: NDArray[np.complex128]
-) -> float:
-    """
-    Extracts and saves the phase, amplitude, and omega data for l=m=2 mode from psi4 wave.
-    Also fits a quadratic to omega and finds its minimum.
-
-    :param time_arr: Array of time data.
-    :param mode_data: Dictionary containing the mode data.
-    :return: float magnitude of the minimum wave frequency of the data
-    """
-
-    collection = psi4_phase_and_amplitude(time, data_m2_l2)
-    angular_frequency = collection[3]
-    if OUTPUT_DIR != "":
-        labels = [
-            "# Col 0: Time",
-            "# Col 1: Amplitude",
-            "# Col 2: Cumulative_Phase",
-            "# Col 3: Angular Frequency",
-        ]
-        filename = f"Rpsi4_r{EXT_RAD:06.1f}_ell2_m2_phase_amp_omega.txt"
-        arrays_to_txt(labels, collection, filename, OUTPUT_DIR)
-    return quad_fit_intercept(time, angular_frequency)
+    return float(np.fabs(c))
 
 
 if __name__ == "__main__":
@@ -419,8 +420,24 @@ if __name__ == "__main__":
     if results.failed > 0:
         print(f"Doctest failed: {results.failed} of {results.attempted} test(s)")
         sys.exit(1)
-    else:
-        if STATUS_MESSAGES:
-            print(f"Doctest passed: All {results.attempted} test(s) passed")
 
-    psi4_ffi_to_strain()
+    if len(sys.argv) > 7:
+        print("Error: Too many Arguments")
+        MSG_1 = "Usage: psi4_ffi_to_strain.py <input dir> <output dir> "
+        MSG_2 = "[maxmimum l] [extraction radius] [sample interval] [cutoff factor]"
+        print(MSG_1 + MSG_2)
+        sys.exit(1)
+
+    workspace = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    default_input = os.path.join(workspace, "data", "GW150914_data", "r100")
+    args = ["0", default_input, "", "8", "100.0", "200.0", "0.75"]
+    args[: len(sys.argv)] = sys.argv
+
+    psi4_ffi_to_strain(
+        str(args[1]),
+        str(args[2]),
+        int(args[3]),
+        float(args[4]),
+        float(args[5]),
+        float(args[6]),
+    )
