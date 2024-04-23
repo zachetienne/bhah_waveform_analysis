@@ -12,8 +12,9 @@ data is saved to txt files.
 
 The primary function returns the second integral data as a numpy array with the various ell-values.
 
-Author: Zachariah B. Etienne
-        zachetie **at** gmail **dot* com
+Authors: Zachariah B. Etienne
+         zachetie **at** gmail **dot* com
+         Nathan Nguyen
 """
 
 import sys
