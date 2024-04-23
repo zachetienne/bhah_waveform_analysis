@@ -30,14 +30,14 @@ from scipy.optimize import curve_fit  # type: ignore
 
 def read_psi4_dir(
     data_dir: str, ell_max: int, ell_min: int = 2
-) -> tuple[NDArray[np.float64], NDArray[np.complex128]]:
+) -> Tuple[NDArray[np.float64], NDArray[np.complex128]]:
     """
     Read data from psi4 output directory and return time and mode data.
 
     :param data_dir: The directory where psi4 output files are located.
     :param ell_max: Maximum spherical harmonic index to read.
     :param ell_min: Minimum spherical harmonic index to read, defaults to 2.
-    :return: tuple[np.ndarray, np.ndarray]
+    :return: Tuple[np.ndarray, np.ndarray]
         - time_data: Array of numpy.float64 time values (shape: (n_times,) ).
         - mode_data: 2D Array for modes of numpy.complex128 data (shape: (2*l+1, n_times,) ).
     :raises ValueError: Raises if the time arrays do not match in length for different l.
@@ -432,6 +432,7 @@ if __name__ == "__main__":
     if results.failed > 0:
         print(f"Doctest failed: {results.failed} of {results.attempted} test(s)")
         sys.exit(1)
+    print(f"Doctests passed: {results.attempted} of {results.attempted} test(s).")
 
     if len(sys.argv) > 7:
         print("Error: Too many Arguments")
