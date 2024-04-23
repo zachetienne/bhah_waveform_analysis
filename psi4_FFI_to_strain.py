@@ -1,5 +1,5 @@
 """
-This module processes gravitational wave data from numerical relativity simulations.
+Convert psi4 to gravitational wave strain, using a fixed-frequency integration method.
 
 The module reads a directory of ASCII files of various ell values of waveform data,
 computes phase and amplitude data, calculates a minimum data frequency using a
